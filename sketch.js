@@ -865,12 +865,7 @@ function setupGUI(collapsedState = null) {
     "Extract Method",
     config,
     "paletteExtractMethod",
-    [
-      "Hue Families",
-      "Hue Families + Accent",
-      "Subject First",
-      "Band Map",
-    ],
+    ["Hue Families", "Hue Families + Accent", "Subject First", "Band Map"],
     updateExtractedPaletteAndRedraw,
     "Hue Families maps dominant hue groups; Hue Families + Accent injects a rarer vivid hue; Subject First prioritizes vivid/rare colors over majority neutrals; Band Map follows segmented bands directly.",
   );
@@ -1834,8 +1829,10 @@ function buildHueFamilyStats(sampleImage, options = {}) {
     1 /
     max(
       1,
-      sqrt(sampleImage.width * sampleImage.width + sampleImage.height * sampleImage.height) *
-        0.5,
+      sqrt(
+        sampleImage.width * sampleImage.width +
+          sampleImage.height * sampleImage.height,
+      ) * 0.5,
     );
 
   let colorfulPixels = 0;
@@ -1891,12 +1888,12 @@ function buildHueFamilyStats(sampleImage, options = {}) {
         });
       }
 
-      const distCenter = sqrt((x - centerX) * (x - centerX) + (y - centerY) * (y - centerY));
+      const distCenter = sqrt(
+        (x - centerX) * (x - centerX) + (y - centerY) * (y - centerY),
+      );
       const centerBoost = constrain(1 - distCenter * invDiag, 0, 1);
       const subjectBoost =
-        1 +
-        subjectPriority *
-          (sat * 0.55 + chroma * 0.85 + centerBoost * 0.35);
+        1 + subjectPriority * (sat * 0.55 + chroma * 0.85 + centerBoost * 0.35);
       const weight = (1 + sat * satWeight * 0.2 + chroma * 0.35) * subjectBoost;
       const bin = bins.get(key);
       bin.count++;
@@ -2274,7 +2271,11 @@ function extractPaletteFromHueFamilies(
           continue;
         }
 
-        const slot = constrain(floor(extracted.length * 0.6), 1, extracted.length - 1);
+        const slot = constrain(
+          floor(extracted.length * 0.6),
+          1,
+          extracted.length - 1,
+        );
         const refLum = luminanceFromHex(fallback[slot + 1]);
         const familyColor = pickHueFamilyColorForLuminance(family, refLum);
         if (!familyColor) {
@@ -2284,7 +2285,12 @@ function extractPaletteFromHueFamilies(
         let rr = round(familyColor.r);
         let gg = round(familyColor.g);
         let bb = round(familyColor.b);
-        [rr, gg, bb] = applyVibranceBoost(rr, gg, bb, min(1, config.paletteVibranceBoost + 0.1));
+        [rr, gg, bb] = applyVibranceBoost(
+          rr,
+          gg,
+          bb,
+          min(1, config.paletteVibranceBoost + 0.1),
+        );
         extracted[slot] = rgbToHex(rr, gg, bb);
         existingHues.push(rgbHueDeg(rr, gg, bb));
         distinctCount++;
