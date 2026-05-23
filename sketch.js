@@ -170,9 +170,21 @@ const DEFAULT_PALETTE_TUNING = {
   paletteAnchorDistance: 16,
   paletteHueSeparation: 34,
   paletteAccentStrength: 0.32,
+  paletteSubjectPriority: 0.65,
+  paletteProtectedStrength: 0.72,
+  paletteProtectedColor0: "#d5672a",
+  paletteProtectedColor1: "#2f8ec9",
+  paletteProtectedColor2: "#f2b134",
   paletteSampleScale: 1,
   paletteLumaAlign: 0,
 };
+
+const DEFAULT_PROTECTED_COLOR_ENABLED = {
+  color0: false,
+  color1: false,
+  color2: false,
+};
+const protectedColorEnabled = { ...DEFAULT_PROTECTED_COLOR_ENABLED };
 
 const COLOR_FAITHFUL_PRESET = {
   paletteMode: "Image Extracted",
@@ -296,6 +308,78 @@ function interpolateNumberArray(baseValues, count) {
 
 function getDefaultPaletteForToneCount() {
   return interpolatePalette(palettePresets.Default, getNumBands());
+}
+
+function getEnabledProtectedColors() {
+  const out = [];
+  for (let i = 0; i < 3; i++) {
+    const enabled = !!protectedColorEnabled[`color${i}`];
+    const key = `paletteProtectedColor${i}`;
+    const hex = config[key];
+    if (enabled && typeof hex === "string" && hex.length > 0) {
+      out.push(hex);
+    }
+  }
+  return out;
+}
+
+function applyProtectedColorsToPalette(basePalette) {
+  const toneCount = getNumBands();
+  const palette = interpolatePalette(basePalette, toneCount);
+  const protectedColors = getEnabledProtectedColors();
+
+  if (protectedColors.length < 1 || toneCount <= 1) {
+    return palette;
+  }
+
+  const strength = constrain(config.paletteProtectedStrength, 0, 1);
+  if (strength <= 0) {
+    return palette;
+  }
+
+  const usedSlots = new Set();
+  const blendAmount = constrain(0.22 + strength * 0.72, 0.22, 0.94);
+
+  for (let i = 0; i < protectedColors.length; i++) {
+    const pickedHex = protectedColors[i];
+    const pickedLum = luminanceFromHex(pickedHex);
+    let bestSlot = -1;
+    let bestDist = Infinity;
+
+    for (let band = 1; band < toneCount; band++) {
+      if (usedSlots.has(band)) {
+        continue;
+      }
+      const slotLum = luminanceFromHex(palette[band]);
+      const dist = abs(slotLum - pickedLum);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestSlot = band;
+      }
+    }
+
+    if (bestSlot < 1) {
+      continue;
+    }
+
+    usedSlots.add(bestSlot);
+    const src = parseHexColor(palette[bestSlot]);
+    const dst = parseHexColor(pickedHex);
+
+    let rr = lerp(src.r, dst.r, blendAmount);
+    let gg = lerp(src.g, dst.g, blendAmount);
+    let bb = lerp(src.b, dst.b, blendAmount);
+    [rr, gg, bb] = applyVibranceBoost(
+      rr,
+      gg,
+      bb,
+      min(1, config.paletteVibranceBoost + strength * 0.08),
+    );
+
+    palette[bestSlot] = rgbToHex(rr, gg, bb);
+  }
+
+  return palette;
 }
 
 function ensurePaletteStateForToneCount() {
@@ -776,26 +860,19 @@ function setupGUI(collapsedState = null) {
     extractPaletteFromSource,
     "Extract colors for the current tone count (including white highlight), apply them to the editable manual palette, and show the result.",
   );
-  gui.addButton(
-    grpPaletteEdit,
-    "Assess Base Colours",
-    assessSourceColors,
-    "Analyze dominant hue families and likely accent colours in the source image; results are printed in the browser console.",
-  );
   gui.addDropdown(
     grpPaletteEdit,
     "Extract Method",
     config,
     "paletteExtractMethod",
     [
-      "Source Anchors",
       "Hue Families",
       "Hue Families + Accent",
+      "Subject First",
       "Band Map",
-      "Band Map Direct",
     ],
     updateExtractedPaletteAndRedraw,
-    "Hue Families links source hues to each tone band for strongest base-image color fidelity; Hue Families + Accent adds a rare vivid source accent; Source Anchors is global; Band Map methods are segmentation-driven alternatives.",
+    "Hue Families maps dominant hue groups; Hue Families + Accent injects a rarer vivid hue; Subject First prioritizes vivid/rare colors over majority neutrals; Band Map follows segmented bands directly.",
   );
   gui.addSlider(
     grpPaletteEdit,
@@ -832,17 +909,6 @@ function setupGUI(collapsedState = null) {
   );
   gui.addSlider(
     grpPaletteEdit,
-    "Sample Scale",
-    config,
-    "paletteSampleScale",
-    0.25,
-    1,
-    0.01,
-    updateExtractedPaletteAndRedraw,
-    "Sampling resolution for source-color extraction from the base image (higher preserves nuanced hues).",
-  );
-  gui.addSlider(
-    grpPaletteEdit,
     "Luma Align",
     config,
     "paletteLumaAlign",
@@ -851,17 +917,6 @@ function setupGUI(collapsedState = null) {
     0.01,
     updateExtractedPaletteAndRedraw,
     "How strongly extracted colors are nudged to tonal luminance slots (lower keeps original hue/chroma).",
-  );
-  gui.addSlider(
-    grpPaletteEdit,
-    "Anchor Distance",
-    config,
-    "paletteAnchorDistance",
-    20,
-    120,
-    1,
-    updateExtractedPaletteAndRedraw,
-    "Minimum RGB distance between picked source anchor colors (higher = more distinct color picks).",
   );
   gui.addSlider(
     grpPaletteEdit,
@@ -884,6 +939,73 @@ function setupGUI(collapsedState = null) {
     0.01,
     updateExtractedPaletteAndRedraw,
     "Blend amount for accent injection in Hue Families + Accent mode.",
+  );
+  gui.addSlider(
+    grpPaletteEdit,
+    "Subject Priority",
+    config,
+    "paletteSubjectPriority",
+    0,
+    1,
+    0.01,
+    updateExtractedPaletteAndRedraw,
+    "Weights extraction toward vivid/rare colors so key subject hues survive even when neutrals dominate area.",
+  );
+  gui.addSlider(
+    grpPaletteEdit,
+    "Protected Colour Strength",
+    config,
+    "paletteProtectedStrength",
+    0,
+    1,
+    0.01,
+    updateExtractedPaletteAndRedraw,
+    "How strongly user-picked colors are injected into the extracted palette.",
+  );
+  gui.addColorPicker(
+    grpPaletteEdit,
+    "Include Colour 1",
+    config,
+    "paletteProtectedColor0",
+    updateExtractedPaletteAndRedraw,
+    "Optional user-selected subject colour to protect during extraction.",
+    {
+      checkbox: {
+        variable: protectedColorEnabled,
+        varName: "color0",
+        onChange: updateExtractedPaletteAndRedraw,
+      },
+    },
+  );
+  gui.addColorPicker(
+    grpPaletteEdit,
+    "Include Colour 2",
+    config,
+    "paletteProtectedColor1",
+    updateExtractedPaletteAndRedraw,
+    "Second optional subject colour to preserve.",
+    {
+      checkbox: {
+        variable: protectedColorEnabled,
+        varName: "color1",
+        onChange: updateExtractedPaletteAndRedraw,
+      },
+    },
+  );
+  gui.addColorPicker(
+    grpPaletteEdit,
+    "Include Colour 3",
+    config,
+    "paletteProtectedColor2",
+    updateExtractedPaletteAndRedraw,
+    "Third optional subject colour to preserve.",
+    {
+      checkbox: {
+        variable: protectedColorEnabled,
+        varName: "color2",
+        onChange: updateExtractedPaletteAndRedraw,
+      },
+    },
   );
   const toneCount = getNumBands();
   ensureToneVisibilityForToneCount();
@@ -1339,6 +1461,10 @@ function resetTuningDefaults() {
     toneVisibility[key] = DEFAULT_TONE_VISIBILITY[key];
   }
 
+  for (const key in DEFAULT_PROTECTED_COLOR_ENABLED) {
+    protectedColorEnabled[key] = DEFAULT_PROTECTED_COLOR_ENABLED[key];
+  }
+
   ensureBandWeightsForToneCount();
   ensurePaletteStateForToneCount();
   ensureToneVisibilityForToneCount();
@@ -1602,18 +1728,22 @@ function recomputeExtractedPalette() {
       const sample = getPaletteSampleImage();
       const palette = extractPaletteFromSourceAnchors(sample);
       if (Array.isArray(palette) && palette.length > 0) {
-        imageExtractedPalette = palette;
-        return palette;
+        const withProtected = applyProtectedColorsToPalette(palette);
+        imageExtractedPalette = withProtected;
+        return withProtected;
       }
       return null;
     }
 
     if (
       config.paletteExtractMethod === "Hue Families" ||
-      config.paletteExtractMethod === "Hue Families + Accent"
+      config.paletteExtractMethod === "Hue Families + Accent" ||
+      config.paletteExtractMethod === "Subject First"
     ) {
       const includeAccent =
-        config.paletteExtractMethod === "Hue Families + Accent";
+        config.paletteExtractMethod === "Hue Families + Accent" ||
+        config.paletteExtractMethod === "Subject First";
+      const isSubjectFirst = config.paletteExtractMethod === "Subject First";
       const sample =
         processed && processed.sampleImage
           ? processed.sampleImage
@@ -1623,10 +1753,15 @@ function recomputeExtractedPalette() {
         sample,
         includeAccent,
         bandMap,
+        {
+          subjectPriority: isSubjectFirst ? config.paletteSubjectPriority : 0,
+          minDistinctHues: isSubjectFirst ? 2 : 1,
+        },
       );
       if (Array.isArray(palette) && palette.length > 0) {
-        imageExtractedPalette = palette;
-        return palette;
+        const withProtected = applyProtectedColorsToPalette(palette);
+        imageExtractedPalette = withProtected;
+        return withProtected;
       }
       return null;
     }
@@ -1639,8 +1774,9 @@ function recomputeExtractedPalette() {
         directBandMap,
       );
       if (Array.isArray(palette) && palette.length > 0) {
-        imageExtractedPalette = palette;
-        return palette;
+        const withProtected = applyProtectedColorsToPalette(palette);
+        imageExtractedPalette = withProtected;
+        return withProtected;
       }
     }
 
@@ -1673,7 +1809,7 @@ function getPaletteSampleImage() {
   return img;
 }
 
-function buildHueFamilyStats(sampleImage) {
+function buildHueFamilyStats(sampleImage, options = {}) {
   if (!sampleImage) {
     return {
       totalPixels: 0,
@@ -1691,6 +1827,16 @@ function buildHueFamilyStats(sampleImage) {
   const lumBucketCount = 16;
   const hueBucketSize = 20;
   const satWeight = constrain(config.paletteSatWeight, 0, 6);
+  const subjectPriority = constrain(options.subjectPriority || 0, 0, 1);
+  const centerX = (sampleImage.width - 1) * 0.5;
+  const centerY = (sampleImage.height - 1) * 0.5;
+  const invDiag =
+    1 /
+    max(
+      1,
+      sqrt(sampleImage.width * sampleImage.width + sampleImage.height * sampleImage.height) *
+        0.5,
+    );
 
   let colorfulPixels = 0;
   let neutralPixels = 0;
@@ -1745,7 +1891,13 @@ function buildHueFamilyStats(sampleImage) {
         });
       }
 
-      const weight = 1 + sat * satWeight * 0.2 + chroma * 0.35;
+      const distCenter = sqrt((x - centerX) * (x - centerX) + (y - centerY) * (y - centerY));
+      const centerBoost = constrain(1 - distCenter * invDiag, 0, 1);
+      const subjectBoost =
+        1 +
+        subjectPriority *
+          (sat * 0.55 + chroma * 0.85 + centerBoost * 0.35);
+      const weight = (1 + sat * satWeight * 0.2 + chroma * 0.35) * subjectBoost;
       const bin = bins.get(key);
       bin.count++;
       bin.w += weight;
@@ -1787,7 +1939,10 @@ function buildHueFamilyStats(sampleImage) {
       const hueCenter = ((bin.bucket + 0.5) * hueBucketSize) % 360;
       const score =
         pow(bin.count, 0.96) *
-        (0.72 + avgSat * 0.2 + avgChroma * 0.25 + vividRatio * 0.16);
+        (0.72 +
+          avgSat * (0.2 + subjectPriority * 0.07) +
+          avgChroma * (0.25 + subjectPriority * 0.1) +
+          vividRatio * (0.16 + subjectPriority * 0.15));
 
       return {
         ...bin,
@@ -1939,6 +2094,7 @@ function extractPaletteFromHueFamilies(
   sampleImage,
   includeAccent = false,
   toneBandMap = null,
+  options = {},
 ) {
   const fallback = getDefaultPaletteForToneCount();
   if (!sampleImage) {
@@ -1958,7 +2114,9 @@ function extractPaletteFromHueFamilies(
 
   const toneCount = getNumBands();
   const targetCount = max(1, toneCount - 1);
-  const stats = buildHueFamilyStats(sampleImage);
+  const subjectPriority = constrain(options.subjectPriority || 0, 0, 1);
+  const minDistinctHues = constrain(floor(options.minDistinctHues || 0), 0, 4);
+  const stats = buildHueFamilyStats(sampleImage, { subjectPriority });
   if (!stats || !Array.isArray(stats.hueBins) || stats.hueBins.length < 1) {
     return fallback;
   }
@@ -2000,9 +2158,9 @@ function extractPaletteFromHueFamilies(
       const repeatPenalty = repeats * 0.14;
 
       const score =
-        lumProximity * 0.56 +
-        prevalence * 0.24 +
-        colorEnergy * 0.22 -
+        lumProximity * (0.56 - subjectPriority * 0.2) +
+        prevalence * (0.24 - subjectPriority * 0.06) +
+        colorEnergy * (0.22 + subjectPriority * 0.34) -
         repeatPenalty;
 
       if (score > bestScore) {
@@ -2058,6 +2216,78 @@ function extractPaletteFromHueFamilies(
           min(1, config.paletteVibranceBoost + 0.08),
         );
         extracted[accentSlot] = rgbToHex(rr, gg, bb);
+      }
+    }
+  }
+
+  if (minDistinctHues > 0) {
+    const existingHues = [];
+    for (let i = 0; i < extracted.length; i++) {
+      const cc = parseHexColor(extracted[i]);
+      const sat = rgbSaturation01(cc.r, cc.g, cc.b);
+      const chroma = (max(cc.r, cc.g, cc.b) - min(cc.r, cc.g, cc.b)) / 255;
+      if (sat >= 0.12 || chroma >= 0.1) {
+        existingHues.push(rgbHueDeg(cc.r, cc.g, cc.b));
+      }
+    }
+
+    let distinctCount = 0;
+    for (let i = 0; i < existingHues.length; i++) {
+      let isDistinct = true;
+      for (let j = 0; j < i; j++) {
+        if (hueDistanceDeg(existingHues[i], existingHues[j]) < 20) {
+          isDistinct = false;
+          break;
+        }
+      }
+      if (isDistinct) {
+        distinctCount++;
+      }
+    }
+
+    if (distinctCount < minDistinctHues) {
+      const candidateFamilies = stats.hueBins
+        .slice()
+        .sort((a, b) => {
+          const scoreA =
+            (a.avgSat * 0.48 + a.avgChroma * 0.75) * (1 - a.prevalence * 2.6);
+          const scoreB =
+            (b.avgSat * 0.48 + b.avgChroma * 0.75) * (1 - b.prevalence * 2.6);
+          return scoreB - scoreA;
+        })
+        .slice(0, 8);
+
+      for (let c = 0; c < candidateFamilies.length; c++) {
+        if (distinctCount >= minDistinctHues) {
+          break;
+        }
+
+        const family = candidateFamilies[c];
+        let farEnough = true;
+        for (let h = 0; h < existingHues.length; h++) {
+          if (hueDistanceDeg(family.hue, existingHues[h]) < 22) {
+            farEnough = false;
+            break;
+          }
+        }
+        if (!farEnough) {
+          continue;
+        }
+
+        const slot = constrain(floor(extracted.length * 0.6), 1, extracted.length - 1);
+        const refLum = luminanceFromHex(fallback[slot + 1]);
+        const familyColor = pickHueFamilyColorForLuminance(family, refLum);
+        if (!familyColor) {
+          continue;
+        }
+
+        let rr = round(familyColor.r);
+        let gg = round(familyColor.g);
+        let bb = round(familyColor.b);
+        [rr, gg, bb] = applyVibranceBoost(rr, gg, bb, min(1, config.paletteVibranceBoost + 0.1));
+        extracted[slot] = rgbToHex(rr, gg, bb);
+        existingHues.push(rgbHueDeg(rr, gg, bb));
+        distinctCount++;
       }
     }
   }
