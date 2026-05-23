@@ -237,6 +237,17 @@ function getDarkestBand() {
   return getNumBands() - 1;
 }
 
+function normalizePaletteExtractMethod() {
+  const allowed = new Set([
+    "Hue Families",
+    "Hue Families + Accent",
+    "Subject First",
+  ]);
+  if (!allowed.has(config.paletteExtractMethod)) {
+    config.paletteExtractMethod = "Hue Families";
+  }
+}
+
 function parseHexColor(hex) {
   const cleaned = (hex || "#000000").replace("#", "");
   const full =
@@ -586,6 +597,7 @@ function updateKeylineAndRedraw() {
 function setup() {
   pixelDensity(1);
   updatePaperDimensions();
+  normalizePaletteExtractMethod();
 
   svgRendererAvailable = typeof SVG !== "undefined";
   if (svgRendererAvailable) {
@@ -758,6 +770,8 @@ function setupGUI(collapsedState = null) {
     gui.remove();
   }
 
+  normalizePaletteExtractMethod();
+
   gui = new GUIPanel({
     width: 300,
     sliderLiveInput: false,
@@ -865,9 +879,9 @@ function setupGUI(collapsedState = null) {
     "Extract Method",
     config,
     "paletteExtractMethod",
-    ["Hue Families", "Hue Families + Accent", "Subject First", "Band Map"],
+    ["Hue Families", "Hue Families + Accent", "Subject First"],
     updateExtractedPaletteAndRedraw,
-    "Hue Families maps dominant hue groups; Hue Families + Accent injects a rarer vivid hue; Subject First prioritizes vivid/rare colors over majority neutrals; Band Map follows segmented bands directly.",
+    "Hue Families maps dominant hue groups; Hue Families + Accent injects a rarer vivid hue; Subject First prioritizes vivid/rare colors over majority neutrals.",
   );
   gui.addSlider(
     grpPaletteEdit,
