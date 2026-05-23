@@ -335,62 +335,120 @@ function getEnabledProtectedColors() {
 }
 
 function applyProtectedColorsToPalette(basePalette) {
-  const toneCount = getNumBands();
-  const palette = interpolatePalette(basePalette, toneCount);
-  const protectedColors = getEnabledProtectedColors();
+  // Keep extracted palette stable; protected colours are now applied locally
+  // at render-time only where source pixels actually match those colours.
+  return interpolatePalette(basePalette, getNumBands());
+}
 
-  if (protectedColors.length < 1 || toneCount <= 1) {
-    return palette;
+function buildProtectedColorRenderContext(data) {
+  if (!data || !data.sampleImage) {
+    return null;
   }
 
   const strength = constrain(config.paletteProtectedStrength, 0, 1);
   if (strength <= 0) {
-    return palette;
+    return null;
   }
 
-  const usedSlots = new Set();
-  const blendAmount = constrain(0.22 + strength * 0.72, 0.22, 0.94);
-
-  for (let i = 0; i < protectedColors.length; i++) {
-    const pickedHex = protectedColors[i];
-    const pickedLum = luminanceFromHex(pickedHex);
-    let bestSlot = -1;
-    let bestDist = Infinity;
-
-    for (let band = 1; band < toneCount; band++) {
-      if (usedSlots.has(band)) {
-        continue;
-      }
-      const slotLum = luminanceFromHex(palette[band]);
-      const dist = abs(slotLum - pickedLum);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestSlot = band;
-      }
-    }
-
-    if (bestSlot < 1) {
-      continue;
-    }
-
-    usedSlots.add(bestSlot);
-    const src = parseHexColor(palette[bestSlot]);
-    const dst = parseHexColor(pickedHex);
-
-    let rr = lerp(src.r, dst.r, blendAmount);
-    let gg = lerp(src.g, dst.g, blendAmount);
-    let bb = lerp(src.b, dst.b, blendAmount);
-    [rr, gg, bb] = applyVibranceBoost(
-      rr,
-      gg,
-      bb,
-      min(1, config.paletteVibranceBoost + strength * 0.08),
-    );
-
-    palette[bestSlot] = rgbToHex(rr, gg, bb);
+  const hexes = getEnabledProtectedColors();
+  if (!Array.isArray(hexes) || hexes.length < 1) {
+    return null;
   }
 
-  return palette;
+  const entries = [];
+  for (let i = 0; i < hexes.length; i++) {
+    const rgb = parseHexColor(hexes[i]);
+    const hue = rgbHueDeg(rgb.r, rgb.g, rgb.b);
+    const sat = rgbSaturation01(rgb.r, rgb.g, rgb.b);
+    const chroma = (max(rgb.r, rgb.g, rgb.b) - min(rgb.r, rgb.g, rgb.b)) / 255;
+    const lum = luminanceFromRGB(rgb.r, rgb.g, rgb.b);
+    entries.push({
+      r: rgb.r,
+      g: rgb.g,
+      b: rgb.b,
+      hue,
+      sat,
+      chroma,
+      lum,
+    });
+  }
+
+  if (entries.length < 1) {
+    return null;
+  }
+
+  data.sampleImage.loadPixels();
+  return {
+    entries,
+    sampleImage: data.sampleImage,
+    strength,
+  };
+}
+
+function blendProtectedColorForPixel(baseRGB, data, idx, context) {
+  if (!context || !baseRGB || !data) {
+    return baseRGB;
+  }
+
+  const sample = context.sampleImage;
+  if (!sample || !sample.pixels || sample.pixels.length < 4) {
+    return baseRGB;
+  }
+
+  const pi = idx * 4;
+  const sr = sample.pixels[pi];
+  const sg = sample.pixels[pi + 1];
+  const sb = sample.pixels[pi + 2];
+  if (!Number.isFinite(sr) || !Number.isFinite(sg) || !Number.isFinite(sb)) {
+    return baseRGB;
+  }
+
+  const sat = rgbSaturation01(sr, sg, sb);
+  const chroma = (max(sr, sg, sb) - min(sr, sg, sb)) / 255;
+  if (sat < 0.045 && chroma < 0.045) {
+    return baseRGB;
+  }
+
+  const hue = rgbHueDeg(sr, sg, sb);
+  const lum = luminanceFromRGB(sr, sg, sb);
+  let best = null;
+  let bestScore = -Infinity;
+
+  for (let i = 0; i < context.entries.length; i++) {
+    const entry = context.entries[i];
+    const hueDist = hueDistanceDeg(hue, entry.hue);
+    const hueScore = 1 - min(1, hueDist / 72);
+    const dr = sr - entry.r;
+    const dg = sg - entry.g;
+    const db = sb - entry.b;
+    const rgbDist = sqrt(dr * dr + dg * dg + db * db);
+    const rgbScore = 1 - min(1, rgbDist / 190);
+    const lumScore = 1 - min(1, abs(lum - entry.lum) / 120);
+    const score = hueScore * 0.58 + rgbScore * 0.3 + lumScore * 0.12;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = entry;
+    }
+  }
+
+  const matchThreshold = 0.59;
+  if (!best || bestScore < matchThreshold) {
+    return baseRGB;
+  }
+
+  const match = constrain(
+    (bestScore - matchThreshold) / (1 - matchThreshold),
+    0,
+    1,
+  );
+  const sourceColorEnergy = constrain(sat * 0.55 + chroma * 0.75, 0.18, 1);
+  const blend = constrain(context.strength * match * sourceColorEnergy, 0, 1);
+
+  const rr = round(lerp(baseRGB.r, best.r, blend));
+  const gg = round(lerp(baseRGB.g, best.g, blend));
+  const bb = round(lerp(baseRGB.b, best.b, blend));
+  return { r: rr, g: gg, b: bb };
 }
 
 function ensurePaletteStateForToneCount() {
@@ -3887,6 +3945,7 @@ function buildKeylineMask(bandMap, grad, w, h) {
 function displayBands(data) {
   const palette = resolvePalette();
   const paletteRGB = palette.map((p) => parseHexColor(p));
+  const protectedContext = buildProtectedColorRenderContext(data);
   const toneCount = getNumBands();
   const showReference = !!sourceImage && config.showOriginalReference;
   const referenceGap = showReference ? 18 : 0;
@@ -3917,9 +3976,12 @@ function displayBands(data) {
       for (let x = 0; x < data.width; x++) {
         const idx = y * data.width + x;
         const band = data.bandMap[idx];
-        const rgb = isBandVisible(band)
+        let rgb = isBandVisible(band)
           ? paletteRGB[band] || { r: 0, g: 0, b: 0 }
           : { r: 255, g: 255, b: 255 };
+        if (isBandVisible(band) && band !== WHITE_BAND) {
+          rgb = blendProtectedColorForPixel(rgb, data, idx, protectedContext);
+        }
         const pi = idx * 4;
         layer.pixels[pi] = rgb.r;
         layer.pixels[pi + 1] = rgb.g;
@@ -3931,24 +3993,24 @@ function displayBands(data) {
     noSmooth();
     image(layer, xOffset, yOffset, drawW, drawH);
   } else {
-    for (let band = 0; band < toneCount; band++) {
-      if (!isBandVisible(band)) {
-        continue;
-      }
-      fill(palette[band]);
-      for (let y = 0; y < data.height; y += cell) {
-        for (let x = 0; x < data.width; x += cell) {
-          const idx = y * data.width + x;
-          if (data.bandMap[idx] !== band) {
-            continue;
-          }
-          rect(
-            xOffset + x * renderScaleX,
-            yOffset + y * renderScaleY,
-            cell * renderScaleX,
-            cell * renderScaleY,
-          );
+    for (let y = 0; y < data.height; y += cell) {
+      for (let x = 0; x < data.width; x += cell) {
+        const idx = y * data.width + x;
+        const band = data.bandMap[idx];
+        if (!isBandVisible(band)) {
+          continue;
         }
+        let rgb = paletteRGB[band] || { r: 0, g: 0, b: 0 };
+        if (band !== WHITE_BAND) {
+          rgb = blendProtectedColorForPixel(rgb, data, idx, protectedContext);
+        }
+        fill(rgb.r, rgb.g, rgb.b);
+        rect(
+          xOffset + x * renderScaleX,
+          yOffset + y * renderScaleY,
+          cell * renderScaleX,
+          cell * renderScaleY,
+        );
       }
     }
   }
@@ -4634,6 +4696,7 @@ function renderProcessedToGraphics(
 ) {
   const palette = resolvePalette();
   const paletteRGB = palette.map((p) => parseHexColor(p));
+  const protectedContext = buildProtectedColorRenderContext(data);
   const toneCount = getNumBands();
   const scale = min(targetWidth / data.width, targetHeight / data.height);
   const drawW = max(1, floor(data.width * scale));
@@ -4654,7 +4717,10 @@ function renderProcessedToGraphics(
       for (let x = 0; x < data.width; x++) {
         const idx = y * data.width + x;
         const band = data.bandMap[idx];
-        const rgb = paletteRGB[band] || { r: 0, g: 0, b: 0 };
+        let rgb = paletteRGB[band] || { r: 0, g: 0, b: 0 };
+        if (band !== WHITE_BAND) {
+          rgb = blendProtectedColorForPixel(rgb, data, idx, protectedContext);
+        }
         const pi = idx * 4;
         layer.pixels[pi] = rgb.r;
         layer.pixels[pi + 1] = rgb.g;
@@ -4666,21 +4732,21 @@ function renderProcessedToGraphics(
     g.noSmooth();
     g.image(layer, xOffset, yOffset, drawW, drawH);
   } else {
-    for (let band = 0; band < toneCount; band++) {
-      g.fill(palette[band]);
-      for (let y = 0; y < data.height; y += cell) {
-        for (let x = 0; x < data.width; x += cell) {
-          const idx = y * data.width + x;
-          if (data.bandMap[idx] !== band) {
-            continue;
-          }
-          g.rect(
-            xOffset + x * renderScaleX,
-            yOffset + y * renderScaleY,
-            cell * renderScaleX,
-            cell * renderScaleY,
-          );
+    for (let y = 0; y < data.height; y += cell) {
+      for (let x = 0; x < data.width; x += cell) {
+        const idx = y * data.width + x;
+        const band = data.bandMap[idx];
+        let rgb = paletteRGB[band] || { r: 0, g: 0, b: 0 };
+        if (band !== WHITE_BAND) {
+          rgb = blendProtectedColorForPixel(rgb, data, idx, protectedContext);
         }
+        g.fill(rgb.r, rgb.g, rgb.b);
+        g.rect(
+          xOffset + x * renderScaleX,
+          yOffset + y * renderScaleY,
+          cell * renderScaleX,
+          cell * renderScaleY,
+        );
       }
     }
   }
